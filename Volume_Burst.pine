@@ -1,0 +1,20 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Comatus
+//@version=6
+indicator('Volume Burst Daily Scan', overlay = true)
+
+// === Inputs ===
+volLookback = input.int(3, 'Volume Lookback', minval = 1)
+volMultiplier = input.float(1.7, 'Volume Multiplier', step = 0.1)
+
+// === Calculations ===
+avgVol = ta.sma(volume, volLookback)
+avgVolPrev = avgVol[1] // yesterday’s moving average
+volRatio = volume / avgVolPrev
+
+// === Conditions ===
+burst = volRatio > volMultiplier
+
+// === Plot ===
+plotshape(burst, title = 'Burst', style = shape.triangleup, location = location.belowbar, color = color.green, size = size.small, text = 'VolBurst')
+

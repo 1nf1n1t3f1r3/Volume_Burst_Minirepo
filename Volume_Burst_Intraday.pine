@@ -1,0 +1,264 @@
+//@version=6
+indicator('Volume Burst Intraday', overlay = true)
+
+// === Inputs ===
+stopLookback = input.int(3, 'Stop lookback bars')
+maxEntryBars = input.int(5, 'Max Entry Bars from Session Start')
+atrPeriod = input.int(10, 'ATR Period')
+emaPeriod = input.int(20, 'EMA Period')
+minEntryATR = input.float(0.5, 'Min EMA Distance (ATR)')
+stopATRmult = input.float(1.0, 'Stop ATR Multiple')
+targetR = input.float(1.0, 'Target R Multiple')
+trailDecay = input.float(0.9, 'ATR Trail Decay', step = 0.01)
+
+entryShadeCol = input.color(color.new(color.blue, 80), 'Entry Window Shade')
+longMarkerColor = input.color(color.green, 'Long Entry Marker')
+shortMarkerColor = input.color(color.red, 'Short Entry Marker')
+stopColor = input.color(color.red, 'Stop Level')
+targetColor = input.color(color.green, 'Target Level')
+trailColor = input.color(color.orange, 'Trailing Stop')
+
+// === EMA and ATR ===
+emaVal = ta.ema(close, emaPeriod)
+atrVal = ta.rma(ta.tr(true), atrPeriod)
+
+// === Detect new day/session ===
+isNewDay = ta.change(time('D')) != 0
+
+// === Arrays to store today data ===
+var array<float> todayLows = array.new_float()
+var array<float> todayHighs = array.new_float()
+var array<int> todayBars = array.new_int()
+
+if isNewDay
+    array.clear(todayLows)
+    array.clear(todayHighs)
+    array.clear(todayBars)
+
+// Append current bar BEFORE calculating rolling lows/highs
+array.push(todayLows, low)
+array.push(todayHighs, high)
+array.push(todayBars, 1)
+
+// === Rolling low/high over stopLookback bars ===
+lookbackBars = math.min(array.size(todayLows), stopLookback)
+float rollingLow = na
+float rollingHigh = na
+
+
+if lookbackBars > 0
+    rollingLow := array.min(array.slice(todayLows, array.size(todayLows) - lookbackBars, array.size(todayLows)))
+    rollingHigh := array.max(array.slice(todayHighs, array.size(todayHighs) - lookbackBars, array.size(todayHighs)))
+    rollingHigh
+
+float safeRollingLow = na(rollingLow) ? low : rollingLow
+float safeRollingHigh = na(rollingHigh) ? low : rollingHigh
+
+// === Bar count and entry window ===
+barCount = array.size(todayBars)
+inEntryWindow = barCount <= maxEntryBars
+bgcolor(inEntryWindow ? entryShadeCol : na)
+
+// Previous bar values
+prevHigh = high[1]
+prevLow = low[1]
+prevEMA = emaVal[1]
+prevATR = atrVal[1]
+
+// === Trade variables ===
+var bool tradeTaken = false
+var bool entryLong = false
+var bool entryShort = false
+var float entryPrice = na
+var float stopPrice = na
+var float targetPrice = na
+var float trailingStop = na
+var float atrMult = na
+var bool tradeActive = false
+var bool exitThisBar = false
+
+// === Candidate variables ===
+candidateLong = false
+candidateShort = false
+
+var float candidateEntryLong = na
+var float candidateStopLong = na
+var float candidateTargetLong = na
+
+var float candidateEntryShort = na
+var float candidateStopShort = na
+var float candidateTargetShort = na
+
+var float distATRLongCurrent = na
+var float distATRShortCurrent = na
+
+// === Trade Result Tracking ===
+var float totalR = 0.0
+var float avgR = na
+var int numTrades = 0
+
+var float exitPrice = na
+var float tradeR = na
+
+// === Candidate and Trade Entry Logic ===
+exitThisBar := false
+
+if inEntryWindow and not tradeTaken and not na(safeRollingLow) and not na(safeRollingHigh)
+    // Candidate long (current bar could be entry next bar)
+    distATRLongCurrent := (high - emaVal) / atrVal
+    distATRShortCurrent := (emaVal - low) / atrVal
+
+    candidateLong := distATRLongCurrent >= minEntryATR
+    if candidateLong and (isNewDay or high <= high[1])
+        candidateEntryLong := high
+        candidateStopLong := safeRollingLow - atrVal * stopATRmult
+        candidateTargetLong := candidateEntryLong + (candidateEntryLong - candidateStopLong) * targetR
+        candidateTargetLong
+    else
+        candidateEntryLong := na
+        candidateStopLong := na
+        candidateTargetLong := na
+        candidateTargetLong
+
+    candidateShort := distATRShortCurrent >= minEntryATR
+    if candidateShort and (isNewDay or low >= low[1])
+        candidateEntryShort := low
+        candidateStopShort := safeRollingHigh + atrVal * stopATRmult
+        candidateTargetShort := candidateEntryShort - (candidateStopShort - candidateEntryShort) * targetR
+        candidateTargetShort
+    else
+        candidateEntryShort := na
+        candidateStopShort := na
+        candidateTargetShort := na
+        candidateTargetShort
+
+
+
+    // Actual trade logic (over previous bar)
+    distATRLong = (prevHigh - prevEMA) / prevATR
+    if high > prevHigh and prevHigh > prevEMA and distATRLong >= minEntryATR and not tradeTaken
+        entryLong := true
+        tradeTaken := true
+        tradeActive := true
+        entryPrice := prevHigh
+        stopPrice := safeRollingLow - prevATR * stopATRmult
+        targetPrice := entryPrice + (entryPrice - stopPrice) * targetR
+        trailingStop := stopPrice
+        atrMult := stopATRmult
+        atrMult
+
+    distATRShort = (prevEMA - prevLow) / prevATR
+    if low < prevLow and prevLow < prevEMA and distATRShort >= minEntryATR and not tradeTaken
+        entryShort := true
+        tradeTaken := true
+        tradeActive := true
+        entryPrice := prevLow
+        stopPrice := safeRollingHigh + prevATR * stopATRmult
+        targetPrice := entryPrice - (stopPrice - entryPrice) * targetR
+        trailingStop := stopPrice
+        atrMult := stopATRmult
+        atrMult
+
+
+
+// === Trailing Stop Update ===
+if tradeActive
+    if entryLong
+        candidateStopBar = safeRollingLow - prevATR * atrMult
+        trailingStop := math.max(trailingStop, candidateStopBar)
+        atrMult := atrMult * trailDecay
+        if low <= trailingStop or high >= targetPrice
+            exitThisBar := true
+            exitThisBar
+
+    if entryShort
+        candidateStopBar = safeRollingHigh + prevATR * atrMult
+        trailingStop := math.min(trailingStop, candidateStopBar)
+        atrMult := atrMult * trailDecay
+        if high >= trailingStop or low <= targetPrice
+            exitThisBar := true
+            exitThisBar
+
+    if exitThisBar
+        tradeActive := false
+        isNewDay := true
+
+        exitPrice := na
+        if entryLong
+            // Gap handling for stop vs target
+            if low <= trailingStop
+                exitPrice := low < trailingStop and open < trailingStop ? open : trailingStop
+                exitPrice
+            else if high >= targetPrice
+                exitPrice := high > targetPrice and open > targetPrice ? open : targetPrice
+                exitPrice
+
+            risk = entryPrice - stopPrice
+            tradeR := na(exitPrice) or risk == 0 ? na : (exitPrice - entryPrice) / risk
+            tradeR
+
+        if entryShort
+            if high >= trailingStop
+                exitPrice := high > trailingStop and open > trailingStop ? open : trailingStop
+                exitPrice
+            else if low <= targetPrice
+                exitPrice := low < targetPrice and open < targetPrice ? open : targetPrice
+                exitPrice
+
+            risk = stopPrice - entryPrice
+            tradeR := na(exitPrice) or risk == 0 ? na : (entryPrice - exitPrice) / risk
+            tradeR
+
+        if not na(tradeR)
+            totalR := totalR + tradeR
+            numTrades := numTrades + 1
+            avgR := totalR / numTrades
+            avgR
+
+// === Reset on new day ===
+if isNewDay
+    tradeTaken := false
+    entryLong := false
+    entryShort := false
+    entryPrice := na
+    stopPrice := na
+    targetPrice := na
+    trailingStop := na
+    atrMult := na
+    tradeActive := false
+    exitThisBar := false
+    candidateLong := false
+    candidateShort := false
+    candidateShort
+
+
+
+// === Plots ===
+plot(tradeActive or exitThisBar ? trailingStop : na, color = trailColor, style = plot.style_circles, linewidth = 2, title = 'Trailing Stop')
+plot(tradeActive or exitThisBar ? stopPrice : na, color = stopColor, style = plot.style_linebr, linewidth = 2, title = 'Stop Level')
+plot(tradeActive or exitThisBar ? targetPrice : na, color = targetColor, style = plot.style_linebr, linewidth = 2, title = 'Target Level')
+
+// Candidates
+plot(candidateEntryLong, color = color.white, style = plot.style_circles)
+plot(candidateStopLong, color = color.orange, style = plot.style_circles)
+plot(candidateTargetLong, color = color.aqua, style = plot.style_circles)
+
+plot(candidateEntryShort, color = color.gray, style = plot.style_circles)
+plot(candidateStopShort, color = color.olive, style = plot.style_circles)
+plot(candidateTargetShort, color = color.teal, style = plot.style_circles)
+
+// plot(safeRollingLow)
+
+candidateEntryLong := na
+candidateStopLong := na
+candidateTargetLong := na
+
+candidateEntryShort := na
+candidateStopShort := na
+candidateTargetShort := na
+
+// Tracking
+plot(totalR, color = color.blue, linewidth = 2, title = 'Cumulative R')
+plot(avgR, color = color.red, linewidth = 2, title = 'Average R Multiple')
+plot(numTrades, color = color.yellow, style = plot.style_stepline, title = 'Number of Trades')
+
